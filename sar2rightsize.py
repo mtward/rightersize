@@ -8,10 +8,38 @@ import socket
 import subprocess
 import sys
 
+import subprocess, json
+
+import subprocess
+import json
+
+SADF = "/usr/bin/sadf"
 
 def run(cmd):
-    return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+    """
+    Python 3.6-compatible subprocess runner that captures stdout+stderr.
+    """
+    p = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True  # Py3.6 replacement for text=True
+    )
+    if p.returncode != 0:
+        raise RuntimeError(
+            "Command failed ({rc}): {cmd}\nSTDOUT:\n{out}\nSTDERR:\n{err}\n".format(
+                rc=p.returncode,
+                cmd=" ".join(cmd),
+                out=p.stdout,
+                err=p.stderr
+            )
+        )
+    return p.stdout
 
+def sadf_json(sa_file, sar_args):
+    cmd = [SADF, "-j", sa_file, "--"] + sar_args
+    out = run(cmd)
+    return json.loads(out)
 
 def percentile(vals, p):
     vals = [v for v in vals if v is not None]
@@ -57,12 +85,6 @@ def choose_sa_files(days):
         elif os.path.isfile(f1):
             files.append(f1)
     return files
-
-
-def sadf_json(sa_file, sar_args):
-    cmd = ["sadf", "-j", sa_file, "--"] + sar_args
-    out = run(cmd)
-    return json.loads(out)
 
 
 def iter_stats(doc):
@@ -133,15 +155,33 @@ def get_ts_key(snap, fallback_idx=None):
 
 def get_cpu_all(snap):
     """
-    sysstat sadf -j tends to put CPU stats under "cpu-load".
-    We look for entry with cpu == "all".
+    Robustly extract the 'all' CPU row from sadf JSON.
+    Handles list-vs-dict variations across sysstat versions.
     """
-    for section_key in ("cpu-load", "cpu", "cpu-load-all"):
-        if section_key in snap:
-            for row in as_list(snap.get(section_key)):
-                cpu = str(row.get("cpu", "")).lower()
-                if cpu == "all":
-                    return row
+    if not isinstance(snap, dict):
+        return None
+
+    cpu_section = snap.get("cpu-load")
+    if not cpu_section:
+        return None
+
+    # Normalize to list
+    if isinstance(cpu_section, dict):
+        cpu_rows = [cpu_section]
+    elif isinstance(cpu_section, list):
+        cpu_rows = cpu_section
+    else:
+        return None
+
+    for row in cpu_rows:
+        if not isinstance(row, dict):
+            continue
+        cpu_id = row.get("cpu")
+        if cpu_id is None:
+            continue
+        if str(cpu_id).lower() == "all":
+            return row
+
     return None
 
 
@@ -180,6 +220,48 @@ def get_swap(snap):
         return sw[0]
     return None
 
+def detect_swap_type_and_usage():
+    """
+    Returns:
+      swap_type: 'none', 'zram', 'disk'
+      disk_swap_used: True/False
+    Policy:
+      - If disk swap exists AND is used -> disk
+      - If disk swap exists but used == 0 and zram is used -> treat as zram
+      - Mixed but unused disk is ignored
+    """
+    zram_present = False
+    zram_used = False
+    disk_present = False
+    disk_used = False
+
+    try:
+        with open("/proc/swaps") as f:
+            for line in f:
+                if line.startswith("Filename") or not line.strip():
+                    continue
+                parts = line.split()
+                dev = parts[0]
+                used_kb = int(parts[3])  # Used column is in KB
+
+                if dev.startswith("/dev/zram"):
+                    zram_present = True
+                    if used_kb > 0:
+                        zram_used = True
+                else:
+                    # swap partition or swapfile
+                    disk_present = True
+                    if used_kb > 0:
+                        disk_used = True
+    except Exception:
+        pass
+
+    if disk_present and disk_used:
+        return "disk", True
+    if zram_present:
+        return "zram", False
+    return "none", False
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -197,7 +279,7 @@ def main():
     ap.add_argument("--os-reserve-mb", type=int, default=1024)
 
     # Conservative change management
-    ap.add_argument("--max-vcpu-reduction", type=int, default=1,
+    ap.add_argument("--max-vcpu-reduction", type=int, default=1000,
                     help="Maximum vCPUs to reduce in a single recommendation (when downsizing is allowed).")
 
     # ---- Burst detection (tuned for 5-minute sysstat sampling) ----
@@ -230,6 +312,8 @@ def main():
     vcpus = cpu_count()
     mem_mb = memtotal_mb()
 
+    notes = []
+
     sa_files = choose_sa_files(args.days)
     if not sa_files:
         result = {
@@ -252,6 +336,7 @@ def main():
     swpin = []
     swpout = []
     swpused_pct = []
+    swap_type, disk_swap_used = detect_swap_type_and_usage()
 
     # Timestamp-aligned series
     cpu_by_ts = {}   # ts -> dict(busy, steal, iowait)
@@ -268,7 +353,9 @@ def main():
             doc_r = sadf_json(f, ["-r"])
             doc_W = sadf_json(f, ["-W"])
             doc_S = sadf_json(f, ["-S"])
-        except Exception:
+        
+        except Exception as e:
+            notes.append(f"sadf failed for {f}: {e}")
             continue
 
         # CPU snapshots with timestamps
@@ -494,21 +581,60 @@ def main():
         vcpu_rec = max(vcpus, vcpu_rec_percentile)
 
     # -------------------------------
-    # Memory recommendation (same conservative guardrails as before)
+    # Memory recommendation (zram + disk-swap-aware guardrails)
     # -------------------------------
     mem_rec_mb = mem_mb or 0
     if p_ws is not None:
         mem_rec_mb = int(math.ceil(p_ws * (1.0 + args.mem_headroom) + args.os_reserve_mb))
 
-    swap_pressure = False
+    # Detect swap activity from sar
+    swap_activity = False
     if (p_swpin or 0.0) > 0.0 or (p_swpout or 0.0) > 0.0:
-        swap_pressure = True
-        notes.append("Swap in/out activity detected. Avoid memory downsizing without deeper review.")
+        swap_activity = True
+        notes.append("Swap in/out activity detected.")
     if (p_swpused or 0.0) > 0.0:
-        notes.append("Swap space in use. Combine with swap-in/out to judge real pressure.")
+        swap_activity = True
+        notes.append("Swap space in use.")
 
-    if mem_mb is not None and swap_pressure and mem_rec_mb < mem_mb:
-        mem_rec_mb = mem_mb
+    # Apply swap policy
+    if mem_mb is not None and swap_activity and mem_rec_mb < mem_mb:
+
+        if swap_type == "disk":
+            # Disk swap actively used → hard stop
+            mem_rec_mb = mem_mb
+            notes.append("Disk-backed swap is in use; memory downsizing blocked.")
+            if confidence == "high":
+                confidence = "medium"
+
+        elif swap_type == "zram":
+            # zram swap (disk swap unused or absent) → soft signal
+            notes.append("zram swap in use; treating swap activity as memory compression.")
+
+            # Add extra safety headroom
+            extra_headroom = 0.10
+            if p_ws is not None:
+                mem_rec_mb = int(math.ceil(
+                    p_ws * (1.0 + args.mem_headroom + extra_headroom)
+                    + args.os_reserve_mb
+                ))
+
+            # Cap reduction (do not shrink aggressively)
+            max_reduction_pct = 0.20
+            floor_mb = int(mem_mb * (1.0 - max_reduction_pct))
+            if mem_rec_mb < floor_mb:
+                mem_rec_mb = floor_mb
+                notes.append("zram present: memory reduction capped at 20%.")
+
+            if confidence == "high":
+                confidence = "medium"
+
+        else:
+            # Unknown swap state → conservative fallback
+            mem_rec_mb = mem_mb
+            notes.append("Swap activity detected but swap type unclear; memory downsizing blocked.")
+            if confidence == "high":
+                confidence = "medium"
+
 
     # Floors
     vcpu_rec = max(1, vcpu_rec)
@@ -567,7 +693,10 @@ def main():
             "p95_swpused_pct": p_swpused,
             "mem_samples_parsed": len(ws_mb)
         },
-
+        "swap": {
+            "swap_type": swap_type,
+            "disk_swap_used": disk_swap_used
+        },
         "recommendation": {
             "vcpu_recommended": vcpu_rec,
             "vcpu_percentile_advisory": vcpu_rec_percentile,
