@@ -1,11 +1,3 @@
-Perfect — thanks for pasting the full `sar2rightsize.py`. That gives enough ground truth to do this **properly**.
-
-Below is a **complete rewritten `README.md`**, based strictly on the actual code paths, defaults, and heuristics in the repository. This is written for a **senior Linux / Ansible / capacity‑planning audience** and goes into deep detail on **how and why recommendations are produced**, not just what buttons to press.
-
-You should be able to drop this in as-is.
-
-***
-
 # rightersize
 
 `rightersize` is a **conservative, audit‑friendly right‑sizing analysis pipeline** built on top of Linux `sysstat` (SAR) data. It uses Ansible only for **data collection and orchestration** and performs **all interpretation and recommendation logic offline in Python**, producing JSON and CSV artifacts suitable for peer review, spreadsheets, or capacity governance processes.
@@ -368,13 +360,5 @@ This tool is designed for:
 *   Capacity planners
 *   SREs governing large fleets
 *   Environments where *downsizing errors are worse than overages*
-
-***
-
-If you want next steps, I can:
-
-*   Add an **Operator Notes / Caveats** section (NUMA, cache‑heavy workloads, JVMs)
-*   Produce a **“How to defend this recommendation in a review”** appendix
-*   Align language explicitly to internal UNC / enterprise capacity governance norms
 
 Just say which direction you want to go.
