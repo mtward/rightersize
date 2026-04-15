@@ -2,7 +2,7 @@
 - name: Collect SAR-based right-sizing recommendations (per host)
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false
   serial: 50
 
   vars:
@@ -23,31 +23,6 @@
     output_dir_local: "/var/tmp/rightsizing-results"
 
   tasks:
-    - name: Ensure sysstat is installed (sar/sadf)
-      ansible.builtin.package:
-        name: sysstat
-        state: present
-
-    - name: Verify sadf is available
-      ansible.builtin.command: sadf -V
-      register: sadf_v
-      changed_when: false
-
-    - name: Check for sysstat daily data files
-      ansible.builtin.find:
-        paths: /var/log/sa
-        patterns: "sa*"
-        file_type: file
-      register: sa_files
-      changed_when: false
-
-    - name: Warn if no sar history exists on host
-      ansible.builtin.debug:
-        msg: >
-          No /var/log/sa/sa* files found. This host cannot be right-sized from sar history
-          (sysstat collection may be disabled or retention too short).
-      when: sa_files.matched | int == 0
-
     - name: Install SAR right-sizing analyzer
       ansible.builtin.copy:
         dest: /usr/local/sbin/rightsizing_sar.py
@@ -55,11 +30,10 @@
         group: root
         mode: "0755"
         src: rightsizing_sar.py
-      when: sa_files.matched | int > 0
 
     - name: Run analyzer to generate /var/tmp/rightsizing.json
       ansible.builtin.command: >
-        /usr/bin/python3 /usr/local/sbin/rightsizing_sar.py
+        /usr/bin/python3 sar2rightsize.py
         --days {{ rs_days }}
         --cpu-percentile {{ cpu_percentile }}
         --mem-percentile {{ mem_percentile }}
@@ -69,104 +43,11 @@
         --os-reserve-mb {{ os_reserve_mb }}
         --out /var/tmp/rightsizing.json
       register: rs_out
-      changed_when: false
-      when: sa_files.matched | int > 0
+      changed_when: true
 
     - name: Fetch JSON result to control node
       ansible.builtin.fetch:
         src: /var/tmp/rightsizing.json
         dest: "{{ output_dir_local }}/{{ inventory_hostname }}.json"
         flat: true
-      when: sa_files.matched | int > 0
-
-
-- name: Merge per-host JSON into a single CSV report (control node)
-  hosts: localhost
-  gather_facts: false
-  vars:
-    output_dir_local: "./rightsizing-results"
-
-  tasks:
-    - name: Ensure output directory exists
-      ansible.builtin.file:
-        path: "{{ output_dir_local }}"
-        state: directory
-        mode: "0755"
-
-    - name: Install merge helper
-      ansible.builtin.copy:
-        dest: "{{ output_dir_local }}/merge_rightsizing.py"
-        mode: "0755"
-        content: |
-          #!/usr/bin/env python3
-          import csv, glob, json, os, sys
-
-          indir = sys.argv[1] if len(sys.argv) > 1 else "."
-          outcsv = sys.argv[2] if len(sys.argv) > 2 else "rightsizing_summary.csv"
-
-          files = sorted(glob.glob(os.path.join(indir, "*.json")))
-          fields = [
-            "host",
-            "current_vcpus",
-            "current_mem_mb",
-            "p95_busy_pct",
-            "p95_iowait_pct",
-            "p95_steal_pct",
-            "p95_runq_sz",
-            "p99_workingset_mb",
-            "p99_commit_pct",
-            "p95_pswpin_per_s",
-            "p95_pswpout_per_s",
-            "vcpu_recommended",
-            "mem_mb_recommended",
-            "mem_gb_recommended",
-            "confidence",
-            "notes"
-          ]
-
-          with open(outcsv, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            w.writeheader()
-            for fn in files:
-              try:
-                d = json.load(open(fn))
-              except Exception:
-                continue
-
-              cpu = d.get("cpu", {})
-              mem = d.get("memory", {})
-              rec = d.get("recommendation", {})
-              cur = d.get("current", {})
-
-              row = {
-                "host": d.get("host"),
-                "current_vcpus": cur.get("vcpus"),
-                "current_mem_mb": cur.get("mem_mb"),
-                "p95_busy_pct": cpu.get("p95_busy_pct"),
-                "p95_iowait_pct": cpu.get("p95_iowait_pct"),
-                "p95_steal_pct": cpu.get("p95_steal_pct"),
-                "p95_runq_sz": cpu.get("p95_runq_sz"),
-                "p99_workingset_mb": mem.get("p99_workingset_mb"),
-                "p99_commit_pct": mem.get("p99_commit_pct"),
-                "p95_pswpin_per_s": mem.get("p95_pswpin_per_s"),
-                "p95_pswpout_per_s": mem.get("p95_pswpout_per_s"),
-                "vcpu_recommended": rec.get("vcpu_recommended"),
-                "mem_mb_recommended": rec.get("mem_mb_recommended"),
-                "mem_gb_recommended": rec.get("mem_gb_recommended"),
-                "confidence": rec.get("confidence"),
-                "notes": " | ".join(rec.get("notes", [])) if isinstance(rec.get("notes"), list) else rec.get("notes")
-              }
-              w.writerow(row)
-
-          print(f"Wrote {outcsv} from {len(files)} JSON files")
-
-    - name: Build CSV summary
-      ansible.builtin.command: >
-        {{ output_dir_local }}/merge_rightsizing.py
-        {{ output_dir_local }}
-        {{ output_dir_local }}/rightsizing_summary.csv
-      changed_when: false
-
-    - name: Tell user where output is
-      ansible.builtin.debug:
-        msg: "Right-sizing report written to {{ output_dir_local }}/rightsizing_summary.csv"
+...
