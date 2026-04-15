@@ -319,7 +319,7 @@ Confidence is surfaced explicitly in output.
 
 ## Output Artifacts
 
-### JSON (`sar2rightsize.py`)
+### JSON file per host
 
 Contains:
 
@@ -328,37 +328,3 @@ Contains:
 *   Burst and contention rationale
 *   Final recommendations with notes
 
-Designed for audit and review.
-
-***
-
-### CSV (`json2csv.py`, `json2summarycsv.py`)
-
-*   `json2csv.py`: row‑level, metric‑centric
-*   `json2summarycsv.py`: host‑level recommendations
-
-Both preserve interpretability over compression.
-
-***
-
-## Non‑Goals (Explicit)
-
-*   No automatic resizing
-*   No cloud flavor tuning
-*   No NUMA or topology modeling
-*   No latency‑aware QoS inference
-
-Those are policy decisions, not tooling decisions.
-
-***
-
-## Intended Audience
-
-This tool is designed for:
-
-*   Infrastructure engineers
-*   Capacity planners
-*   SREs governing large fleets
-*   Environments where *downsizing errors are worse than overages*
-
-Just say which direction you want to go.
