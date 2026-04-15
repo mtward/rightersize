@@ -1,285 +1,380 @@
-# Linux VM Right‑Sizing via `sar` (Conservative, Burst‑Aware)
+Perfect — thanks for pasting the full `sar2rightsize.py`. That gives enough ground truth to do this **properly**.
 
-## Overview
+Below is a **complete rewritten `README.md`**, based strictly on the actual code paths, defaults, and heuristics in the repository. This is written for a **senior Linux / Ansible / capacity‑planning audience** and goes into deep detail on **how and why recommendations are produced**, not just what buttons to press.
 
-`rightsizing_sar.py` is a **conservative, production‑safe Linux VM right‑sizing tool** that analyzes **historical sysstat (`sar`) data** to produce **CPU and memory recommendations** while explicitly protecting:
-
-*   **Batch workloads**
-*   **Scheduled peak jobs**
-*   **Short but critical CPU bursts**
-*   **Virtualized environments with CPU contention (steal time)**
-
-Unlike naïve percentile‑only approaches, this tool is designed to **avoid breaking workloads** by default.  
-It favors **stability and SLA protection over aggressive cost reclamation**.
+You should be able to drop this in as-is.
 
 ***
 
-## Key Design Principles
+# rightersize
 
-1.  **Conservative by default**
-    *   CPU downsizing is *blocked* unless strong evidence shows it is safe.
-2.  **Burst‑aware**
-    *   Short, infrequent CPU spikes are *not ignored* if they indicate real parallel demand.
-3.  **VM‑aware**
-    *   Uses `%steal` to detect hypervisor contention and avoid false downsizing.
-4.  **Explainable**
-    *   Every decision includes explicit indicators and rationale in the output.
-5.  **Uses native Linux data**
-    *   No agents, Prometheus, or cloud APIs required.
-    *   Relies entirely on `sysstat` (`sar` / `sadf`) history.
+`rightersize` is a **conservative, audit‑friendly right‑sizing analysis pipeline** built on top of Linux `sysstat` (SAR) data. It uses Ansible only for **data collection and orchestration** and performs **all interpretation and recommendation logic offline in Python**, producing JSON and CSV artifacts suitable for peer review, spreadsheets, or capacity governance processes.
 
-***
+This project deliberately avoids:
 
-## What This Tool Is (and Is Not)
+*   real‑time monitoring
+*   vendor‑specific heuristics
+*   opaque scoring models
+*   automatic resizing actions
 
-### ✅ This tool **is**
-
-*   A **VM‑level rightsizing advisor** for Linux
-*   Suitable for **mixed fleets** (services + batch)
-*   Designed for **vSphere / KVM environments**
-*   Safe to run at scale across hundreds of hosts
-
-### ❌ This tool is **not**
-
-*   A real‑time monitoring tool
-*   A cloud cost optimizer
-*   A replacement for application‑level load testing
-*   Aggressive by default
+The output is a **defensible recommendation**, not an imperative.
 
 ***
 
-## Data Sources
+## Repository Contents
 
-The script reads historical binary sysstat data from:
+    .
+    ├── ansible-rightsize-report.yml
+    ├── sar2rightsize.py
+    ├── json2csv.py
+    ├── json2summarycsv.py
+    ├── LICENSE
+    └── README.md
 
-    /var/log/sa/sa*
+### Roles of Each Component
 
-It uses `sadf -j` (JSON output) to extract:
-
-*   CPU utilization (`sar -u`)
-*   Run queue depth (`sar -q`)
-*   Memory usage (`sar -r`)
-*   Swap activity (`sar -W`, `sar -S`)
-
-**Default sampling interval assumed:** 5 minutes  
-**Default lookback window:** 30 days
-
-***
-
-## CPU Sizing Methodology
-
-### 1. Percentile Analysis (Advisory)
-
-*   Computes **P95 CPU busy**
-*   Applies **headroom** (default 20%)
-*   Targets **70% sustained utilization**
-
-This produces an **advisory CPU size**, *not an automatic reduction*.
+| File                           | Purpose                                                                 |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `ansible-rightsize-report.yml` | Collects historical SAR data and invokes analysis                       |
+| `sar2rightsize.py`             | Core analytics engine: parses, correlates, and produces recommendations |
+| `json2csv.py`                  | Flattens raw JSON output to row‑level CSV                               |
+| `json2summarycsv.py`           | Produces summary‑level, host‑centric CSV                                |
 
 ***
 
-### 2. Burst Classification (Critical)
+## Design Philosophy
 
-A host is classified as **`bursty usage`** if it shows evidence of **real, repeatable CPU bursts**, defined as:
+1.  **SAR is the source of truth**  
+    No procfs scraping, no live sampling. Historical data only.
 
-#### Sustained burst
+2.  **Percentiles > averages**  
+    Tail behavior matters for capacity planning.
 
-*   ≥ **3 consecutive samples** (≈ 15 minutes)
-*   CPU busy ≥ **90%**
-*   **AND** run queue ≥ vCPUs (parallel demand)
+3.  **Downsizing is opt‑out, not opt‑in**  
+    Any sign of risk blocks reductions.
 
-#### Recurring burst
+4.  **Bursts are real workloads**  
+    Periodic saturation is treated as demand, not noise.
 
-*   ≥ **6 total samples** (≈ 30 minutes cumulative)
-*   CPU busy ≥ **90%**
-*   **AND** run queue ≥ vCPUs
-
-#### Tail burst
-
-*   **P99.5 CPU busy ≥ 90%**
-*   Evaluated on run‑queue‑qualified samples
-
-> **Run‑queue corroboration is required by default** to avoid false positives from short single‑thread spikes.
+5.  **Swap semantics matter**  
+    zram ≠ disk swap ≠ no swap.
 
 ***
 
-### 3. Hypervisor Contention Protection
+## Data Collection (Ansible)
 
-CPU downsizing is **blocked** if:
+The Ansible playbook invokes `sar2rightsize.py` on each host and relies on:
 
-*   P95 `%steal` ≥ **2%**, or
-*   Max `%steal` ≥ **5%**
+*   `/var/log/sa/sa*` historical files
+*   `sadf -j` to emit machine‑readable JSON
+*   No live SAR execution
 
-This prevents shrinking VMs when CPU pressure is caused by **host‑level contention**, not guest demand.
-
-***
-
-### 4. Final CPU Decision Logic
-
-| Condition                 | CPU Recommendation        |
-| ------------------------- | ------------------------- |
-| Bursty usage detected     | **No CPU downsizing**     |
-| Steal contention detected | **No CPU downsizing**     |
-| Steady usage + clean data | Allow **small step‑down** |
-| Under‑provisioned         | Allow increase            |
-
+Defaults passed implicitly or explicitly mirror the Python defaults unless overridden.
 
 ***
 
-## Memory Sizing Methodology
+## How `sar2rightsize.py` Works
 
-Memory sizing is simpler but still conservative:
+### 1. Input Window Selection
 
-1.  Compute **P99 working set memory**
-2.  Add **20% headroom**
-3.  Add **OS reserve** (default 1024 MB)
-
-### Hard Safety Rule
-
-If **any swap‑in or swap‑out activity** is observed:
-
-*   Memory **will not be reduced**, even if percentiles suggest it.
-
-This avoids slow‑burn performance regressions and OOM risk.
-
-***
-
-## Host Classification
-
-Each host is explicitly classified:
-
-*   `steady usage`
-*   `bursty usage`
-
-Along with:
-
-*   `burst_indicators`
-*   `contention_indicators`
-
-This makes it easy to:
-
-*   Filter safe candidates
-*   Defend decisions to application teams
-*   Audit why a host was protected
-
-***
-
-## Output Format
-
-The script produces **one JSON file per host**, for example:
-
-```json
-{
-  "host": "app01",
-  "classification": {
-    "usage_pattern": "bursty usage",
-    "burst_indicators": [
-      "sustained burst: >= 3 consecutive samples with busy>=90% AND runq>=6"
-    ]
-  },
-  "current": {
-    "vcpus": 6,
-    "mem_mb": 32768
-  },
-  "recommendation": {
-    "vcpu_recommended": 6,
-    "mem_mb_recommended": 28672,
-    "confidence": "high"
-  }
-}
-```
-
-These JSON files are designed to be **merged later into CSV** for reporting.
-
-***
-
-## Requirements
-
-### Software
-
-*   Python 3.8+
-*   `sysstat` (version ≥ 12 recommended)
-
-### System
-
-*   Linux (RHEL 8/9/10 assumed)
-*   Historical `sar` data enabled and retained
-
-Verify collection:
+By default:
 
 ```bash
-systemctl status sysstat
-ls /var/log/sa/sa*
+--days 30
 ```
+
+The script searches:
+
+*   `/var/log/sa/saDD`
+*   `/var/log/sa/saYYYYMMDD`
+
+Only files that exist are used. Missing days are tolerated but reduce confidence.
 
 ***
 
-## Running the Script
+### 2. Metrics Collected (and Why)
 
-Basic run (recommended defaults):
+#### CPU (`sadf -u`)
+
+Extracted fields:
+
+*   `%user`
+*   `%nice`
+*   `%system`
+*   `%irq`
+*   `%soft`
+*   `%steal`
+*   `%iowait`
+
+**Busy CPU** is defined as:
+
+    user + nice + system + irq + soft + steal
+
+Rationale:
+
+*   I/O wait is excluded from “CPU demand”
+*   Steal time is included in busy because it reflects *requested but denied* CPU
+
+Collected series:
+
+*   per-sample busy %
+*   iowait %
+*   steal %
+
+***
+
+#### Scheduler Queue (`sadf -q`)
+
+Field:
+
+*   `runq-sz`
+
+Rationale:
+
+*   CPU saturation without queue growth is often benign
+*   Queue depth correlates strongly with user‑visible contention
+*   Used as **burst corroboration**
+
+***
+
+#### Memory (`sadf -r`)
+
+Key fields:
+
+*   `kbmemused`
+*   `kbbuffers`
+*   `kbcached`
+*   `kbslab`
+*   `%commit`
+
+**Working set approximation**:
+
+```text
+If memory used > 90% of total:
+  WS ≈ used − (buffers + cache + slab)
+Else:
+  WS ≈ used
+```
+
+Rationale:
+
+*   Avoids shrinking memory based on reclaimable page cache
+*   Conservative under cache pressure
+
+***
+
+#### Swap Activity
+
+From SAR:
+
+*   `pswpin/s`
+*   `pswpout/s`
+*   `%swpused`
+
+From `/proc/swaps`:
+
+*   disk‑backed vs zram swap
+*   whether swap is *actively used*
+
+***
+
+### 3. Percentiles (Default)
+
+| Resource        | Percentile |
+| --------------- | ---------- |
+| CPU             | p95        |
+| Memory          | p99        |
+| Swap IO         | p95        |
+| Burst detection | p99.5      |
+
+Percentiles are computed explicitly (no numpy dependency) and ignore missing samples.
+
+***
+
+### 4. Timestamp Alignment
+
+CPU and run‑queue samples are aligned by:
+
+*   SADF timestamp fields (`date`, `time`, `iso`, or epoch)
+*   Falling back to index ordering if necessary
+
+This enables **correlated burst detection**, not just independent maxima.
+
+***
+
+## Burst Detection (Why Downsizing Is Hard)
+
+The script intentionally biases toward **false negatives**, not false positives.
+
+### Default Burst Criteria
+
+A host is considered **bursty** if *any* of the following are true:
+
+1.  **Sustained burst**
+    *   ≥ 3 consecutive 5‑min samples
+    *   CPU busy ≥ 90%
+    *   AND runq ≥ vCPUs × 1.0
+
+2.  **Recurring burst**
+    *   ≥ 6 total burst‑qualified samples
+    *   Same conditions as above
+
+3.  **Tail burst**
+    *   p99.5 busy ≥ 90%
+    *   Computed over runq‑qualified samples
+
+Run queue corroboration is **required by default** to reduce misclassification from single‑thread or cache‑miss artifacts.
+
+***
+
+## CPU Recommendation Logic
+
+### Demand Estimation
+
+```text
+effective_demand =
+    (p95_busy / 100)
+  × (1 + cpu_headroom)
+
+recommended_vcpus =
+    ceil(
+      current_vcpus ×
+      (effective_demand / cpu_target)
+    )
+```
+
+Defaults:
+
+*   target utilization: **70%**
+*   headroom: **20%**
+
+This intentionally lands **below saturation**, not at it.
+
+***
+
+### Guards That Block Downsizing
+
+CPU downsizing is blocked if **any** of the following are true:
+
+*   Bursty classification triggered
+*   p95 steal ≥ 2%
+*   max steal ≥ 5%
+
+Upsizing *is still allowed* under contention.
+
+Maximum one‑step reduction is capped via:
 
 ```bash
-/usr/bin/python3 rightsizing_sar.py \
-  --days 30 \
-  --out /var/tmp/rightsizing.json
+--max-vcpu-reduction
 ```
 
-### Common tuning knobs (optional)
+Default is effectively unlimited but present for change‑control workflows.
 
-More permissive downsizing:
+***
 
-```bash
---burst-recurring-samples 12
---burst-runq-factor 1.2
+## Memory Recommendation Logic
+
+### Base Formula
+
+```text
+recommended_mb =
+    ceil(
+      p99_working_set × (1 + mem_headroom)
+    )
+  + os_reserve_mb
 ```
 
-More conservative:
+Defaults:
 
-```bash
---burst-sustained-samples 2
---max-vcpu-reduction 0
-```
+*   memory headroom: **20%**
+*   OS reserve: **1024 MB**
 
 ***
 
-## Interpreting Results (Important)
+### Swap‑Aware Guardrails
 
-*   **“No change” does not mean failure**  
-    It means the system showed evidence that downsizing might be risky.
-*   **Bursty systems are protected intentionally**  
-    These are often the most business‑critical.
-*   **Confidence level matters**  
-    Low confidence usually means insufficient data, not low usage.
+Swap behavior fundamentally alters interpretation:
 
-***
+| Swap Type      | Behavior                              |
+| -------------- | ------------------------------------- |
+| Disk swap used | **Hard stop** – no memory reduction   |
+| zram only      | Soft signal – allow limited reduction |
+| Unknown        | Conservative stop                     |
 
-## When to Trust the Tool
+For zram:
 
-✅ Safe to trust for:
+*   Adds additional 10% headroom
+*   Caps downsizing to **≤20%** total reduction
 
-*   Identifying *obviously* oversized steady services
-*   Blocking dangerous downsizing
-*   Fleet‑wide analysis and trend tracking
+Rationale:
 
-⚠️ Still validate manually for:
-
-*   Databases
-*   Licensed software
-*   Known seasonal workloads
-*   Hosts with recent application changes
+*   zram often masks pressure safely
+*   disk swap indicates real shortage
 
 ***
 
-## Philosophy (Why This Exists)
+## Confidence Scoring
 
-Most right‑sizing tools answer:
+| Condition        | Confidence Impact |
+| ---------------- | ----------------- |
+| <200 CPU samples | High → Medium     |
+| Swap activity    | High → Medium     |
+| Missing SAR data | Medium → Low      |
 
-> “How much do you use most of the time?”
-
-This tool also asks:
-
-> **“How much do you ever need when it matters?”**
-
-That second question is why it exists.
+Confidence is surfaced explicitly in output.
 
 ***
+
+## Output Artifacts
+
+### JSON (`sar2rightsize.py`)
+
+Contains:
+
+*   Classification details
+*   Raw percentiles
+*   Burst and contention rationale
+*   Final recommendations with notes
+
+Designed for audit and review.
+
+***
+
+### CSV (`json2csv.py`, `json2summarycsv.py`)
+
+*   `json2csv.py`: row‑level, metric‑centric
+*   `json2summarycsv.py`: host‑level recommendations
+
+Both preserve interpretability over compression.
+
+***
+
+## Non‑Goals (Explicit)
+
+*   No automatic resizing
+*   No cloud flavor tuning
+*   No NUMA or topology modeling
+*   No latency‑aware QoS inference
+
+Those are policy decisions, not tooling decisions.
+
+***
+
+## Intended Audience
+
+This tool is designed for:
+
+*   Infrastructure engineers
+*   Capacity planners
+*   SREs governing large fleets
+*   Environments where *downsizing errors are worse than overages*
+
+***
+
+If you want next steps, I can:
+
+*   Add an **Operator Notes / Caveats** section (NUMA, cache‑heavy workloads, JVMs)
+*   Produce a **“How to defend this recommendation in a review”** appendix
+*   Align language explicitly to internal UNC / enterprise capacity governance norms
+
+Just say which direction you want to go.
