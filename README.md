@@ -123,7 +123,6 @@ This prevents shrinking VMs when CPU pressure is caused by **host‑level conten
 | Steady usage + clean data | Allow **small step‑down** |
 | Under‑provisioned         | Allow increase            |
 
-**Maximum CPU reduction per run:** 1 vCPU (default)
 
 ***
 
