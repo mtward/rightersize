@@ -25,15 +25,15 @@
   tasks:
     - name: Install SAR right-sizing analyzer
       ansible.builtin.copy:
-        dest: /usr/local/sbin/rightsizing_sar.py
+        dest: /usr/local/sbin/sar2rightsize.py
         owner: root
         group: root
         mode: "0755"
-        src: rightsizing_sar.py
+        src: sar2rightsize.py
 
     - name: Run analyzer to generate /var/tmp/rightsizing.json
       ansible.builtin.command: >
-        /usr/bin/python3 sar2rightsize.py
+        /usr/bin/python3 /usr/local/sbin/sar2rightsize.py
         --days {{ rs_days }}
         --cpu-percentile {{ cpu_percentile }}
         --mem-percentile {{ mem_percentile }}

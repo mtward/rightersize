@@ -23,6 +23,12 @@ The output is a **defensible recommendation**, not an imperative.
     ├── LICENSE
     └── README.md
 
+### Usage
+
+ansible-playbook ansible-rightsize-report.yml  -bK
+python3 json2summarycsv.py /var/tmp/rightsizing-results/ summary.csv
+
+
 ### Roles of Each Component
 
 | File                           | Purpose                                                                 |
