@@ -276,7 +276,7 @@ def main():
 
     # Memory sizing knobs
     ap.add_argument("--mem-headroom", type=float, default=0.20)
-    ap.add_argument("--os-reserve-mb", type=int, default=1024)
+    ap.add_argument("--os-reserve-mb", type=int, default=2048)
 
     # Conservative change management
     ap.add_argument("--max-vcpu-reduction", type=int, default=1000,
