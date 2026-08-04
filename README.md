@@ -286,7 +286,7 @@ recommended_mb =
 Defaults:
 
 *   memory headroom: **20%**
-*   OS reserve: **1024 MB**
+*   OS reserve: **2048 MB**
 
 ***
 
